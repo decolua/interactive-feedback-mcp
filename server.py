@@ -7,7 +7,7 @@ import json
 import tempfile
 import subprocess
 
-from typing import Annotated, Dict
+from typing import Annotated, Dict, Optional, List
 
 from fastmcp import FastMCP
 from pydantic import Field
@@ -15,7 +15,7 @@ from pydantic import Field
 # The log_level is necessary for Cline to work: https://github.com/jlowin/fastmcp/issues/81
 mcp = FastMCP("Interactive Feedback MCP", log_level="ERROR")
 
-def launch_feedback_ui(project_directory: str, summary: str) -> dict[str, str]:
+def launch_feedback_ui(project_directory: str, summary: str, modified_files: Optional[List[str]] = None) -> dict[str, str]:
     # Create a temporary file for the feedback result
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         output_file = tmp.name
@@ -36,6 +36,10 @@ def launch_feedback_ui(project_directory: str, summary: str) -> dict[str, str]:
             "--prompt", summary,
             "--output-file", output_file
         ]
+        
+        # Add modified files if provided
+        if modified_files:
+            args.extend(["--modified-files", json.dumps(modified_files)])
         result = subprocess.run(
             args,
             check=False,
@@ -65,9 +69,10 @@ def first_line(text: str) -> str:
 def interactive_feedback(
     project_directory: Annotated[str, Field(description="Full path to the project directory")],
     summary: Annotated[str, Field(description="Short, one-line summary of the changes")],
+    modified_files: Annotated[Optional[List[str]], Field(description="List of file paths that were modified", default=None)] = None,
 ) -> Dict[str, str]:
     """Request interactive feedback for a given project directory and summary"""
-    return launch_feedback_ui(first_line(project_directory), first_line(summary))
+    return launch_feedback_ui(first_line(project_directory), first_line(summary), modified_files)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

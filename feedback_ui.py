@@ -9,18 +9,22 @@ import argparse
 import subprocess
 import threading
 import hashlib
-from typing import Optional, TypedDict
+from typing import Optional, TypedDict, List
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QGroupBox
+    QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QGroupBox,
+    QListWidget, QListWidgetItem, QSplitter, QScrollArea, QFrame
 )
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSettings
+from PySide6.QtGui import QShortcut, QKeySequence
 from PySide6.QtGui import QTextCursor, QIcon, QKeyEvent, QFont, QFontDatabase, QPalette, QColor
 
 class FeedbackResult(TypedDict):
     command_logs: str
     interactive_feedback: str
+    modified_files_content: Optional[str]
+    selected_files: List[str]
 
 class FeedbackConfig(TypedDict):
     run_command: str
@@ -209,11 +213,158 @@ class FeedbackTextEdit(QTextEdit):
 class LogSignals(QObject):
     append_log = Signal(str)
 
+class ClickableFileItem(QWidget):
+    """Custom widget for file items that can be clicked on text"""
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        # Default to checked only for .md files
+        self.is_checked = file_path.lower().endswith('.md')
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(3, 1, 3, 1)
+        
+        # Checkbox
+        self.checkbox = QCheckBox()
+        self.checkbox.setChecked(self.is_checked)
+        self.checkbox.stateChanged.connect(self._on_checkbox_changed)
+        
+        # File label that's clickable
+        self.file_label = QLabel(file_path)
+        self.file_label.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                padding: 2px;
+                border-radius: 2px;
+            }
+            QLabel:hover {
+                background-color: rgba(255, 255, 255, 0.1);
+                cursor: pointer;
+            }
+        """)
+        self.file_label.mousePressEvent = self._on_label_clicked
+        
+        # File size info
+        self.size_label = QLabel()
+        self.size_label.setStyleSheet("color: #888888; font-size: 9pt;")
+        self._update_size_info()
+        
+        layout.addWidget(self.checkbox)
+        layout.addWidget(self.file_label, 1)  # Take remaining space
+        layout.addWidget(self.size_label)
+        
+    def _update_size_info(self):
+        """Update file size information"""
+        try:
+            if hasattr(self.parent(), 'project_directory'):
+                full_path = os.path.join(self.parent().project_directory, self.file_path)
+            else:
+                # Fallback: try to get from main window
+                main_window = self
+                while main_window.parent():
+                    main_window = main_window.parent()
+                if hasattr(main_window, 'project_directory'):
+                    full_path = os.path.join(main_window.project_directory, self.file_path)
+                else:
+                    full_path = self.file_path
+                    
+            if os.path.exists(full_path):
+                size = os.path.getsize(full_path)
+                if size < 1024:
+                    self.size_label.setText(f"{size}B")
+                elif size < 1024 * 1024:
+                    self.size_label.setText(f"{size/1024:.1f}KB")
+                else:
+                    self.size_label.setText(f"{size/(1024*1024):.1f}MB")
+            else:
+                self.size_label.setText("N/A")
+        except:
+            self.size_label.setText("")
+    
+    def _on_checkbox_changed(self, state):
+        self.is_checked = state == Qt.Checked
+        if hasattr(self.parent(), '_notify_selection_changed'):
+            self.parent()._notify_selection_changed(self.file_path, self.is_checked)
+    
+    def _on_label_clicked(self, event):
+        """Toggle checkbox when label is clicked"""
+        self.checkbox.setChecked(not self.checkbox.isChecked())
+        
+    def setChecked(self, checked: bool):
+        self.checkbox.setChecked(checked)
+        
+    def isChecked(self) -> bool:
+        return self.checkbox.isChecked()
+
+class FileListWidget(QScrollArea):
+    """Custom file list widget with clickable text"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.main_window = None
+        
+        # Container widget
+        self.container = QWidget()
+        self.layout = QVBoxLayout(self.container)
+        self.layout.setContentsMargins(2, 2, 2, 2)
+        self.layout.setSpacing(0)
+        
+        # Setup scroll area
+        self.setWidget(self.container)
+        self.setWidgetResizable(True)
+        self.setMaximumHeight(120)  # Smaller height
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # Style
+        self.setStyleSheet("""
+            QScrollArea {
+                border: 1px solid #555555;
+                border-radius: 4px;
+                background-color: #2b2b2b;
+            }
+        """)
+        
+        self.file_items = {}
+        
+    def set_main_window(self, main_window):
+        """Set reference to main window for project directory access"""
+        self.main_window = main_window
+        
+    def add_file(self, file_path: str):
+        """Add a file to the list"""
+        item = ClickableFileItem(file_path, self)
+        # Set project directory for size calculation
+        if self.main_window and hasattr(self.main_window, 'project_directory'):
+            item.project_directory = self.main_window.project_directory
+        self.file_items[file_path] = item
+        self.layout.addWidget(item)
+        
+    def _notify_selection_changed(self, file_path: str, is_checked: bool):
+        """Notify main window of selection changes"""
+        if self.main_window and hasattr(self.main_window, '_on_file_selection_changed_new'):
+            self.main_window._on_file_selection_changed_new(file_path, is_checked)
+            
+    def select_all(self):
+        """Select all files"""
+        for item in self.file_items.values():
+            item.setChecked(True)
+            
+    def deselect_all(self):
+        """Deselect all files"""
+        for item in self.file_items.values():
+            item.setChecked(False)
+            
+    def get_selected_files(self) -> List[str]:
+        """Get list of selected files"""
+        return [path for path, item in self.file_items.items() if item.isChecked()]
+
 class FeedbackUI(QMainWindow):
-    def __init__(self, project_directory: str, prompt: str):
+    def __init__(self, project_directory: str, prompt: str, modified_files: Optional[List[str]] = None):
         super().__init__()
         self.project_directory = project_directory
         self.prompt = prompt
+        self.modified_files = modified_files or []
+        self.selected_files = set()  # Track which files are selected
 
         self.process: Optional[subprocess.Popen] = None
         self.log_buffer = []
@@ -235,10 +386,10 @@ class FeedbackUI(QMainWindow):
         if geometry:
             self.restoreGeometry(geometry)
         else:
-            self.resize(800, 600)
+            self.resize(650, 550)  # Smaller width: 650 instead of 800
             screen = QApplication.primaryScreen().geometry()
-            x = (screen.width() - 800) // 2
-            y = (screen.height() - 600) // 2
+            x = (screen.width() - 650) // 2
+            y = (screen.height() - 550) // 2
             self.move(x, y)
         state = self.settings.value("windowState")
         if state:
@@ -268,6 +419,12 @@ class FeedbackUI(QMainWindow):
             self.toggle_command_button.setText("Show Command Section")
 
         set_dark_title_bar(self, True)
+        
+        # Setup keyboard shortcuts
+        self._setup_keyboard_shortcuts()
+        
+        # Setup auto-save timer
+        self._setup_auto_save()
 
         if self.config.get("execute_automatically", False):
             self._run_command()
@@ -353,6 +510,13 @@ class FeedbackUI(QMainWindow):
         self.command_group.setVisible(False) 
         layout.addWidget(self.command_group)
 
+        # File Changes section (only show if modified_files provided)
+        if self.modified_files:
+            self._create_file_changes_section(layout)
+
+        # Quick Actions section
+        self._create_quick_actions_section(layout)
+
         # Feedback section with adjusted height
         self.feedback_group = QGroupBox("Feedback")
         feedback_layout = QVBoxLayout(self.feedback_group)
@@ -383,16 +547,369 @@ class FeedbackUI(QMainWindow):
         # Add widgets in a specific order
         layout.addWidget(self.feedback_group)
 
+        # Help and keyboard shortcuts
+        help_layout = QHBoxLayout()
+        
+        # Keyboard shortcuts help
+        shortcuts_label = QLabel("💡 Shortcuts: Ctrl+1-6 (Quick actions) • Ctrl+P (Preview) • Ctrl+Shift+S (Smart) • Esc (Clear)")
+        shortcuts_label.setStyleSheet("font-size: 8pt; color: #999999;")
+        shortcuts_label.setWordWrap(True)
+        
+        help_layout.addWidget(shortcuts_label)
+        layout.addLayout(help_layout)
+
         # Credits/Contact Label
-        contact_label = QLabel('Need to improve? Contact Fábio Ferreira on <a href="https://x.com/fabiomlferreira">X.com</a> or visit <a href="https://dotcursorrules.com/">dotcursorrules.com</a>')
+        contact_label = QLabel('Enhanced by AI • Contact Fábio Ferreira on <a href="https://x.com/fabiomlferreira">X.com</a> or visit <a href="https://dotcursorrules.com/">dotcursorrules.com</a>')
         contact_label.setOpenExternalLinks(True)
         contact_label.setAlignment(Qt.AlignCenter)
-        # Optionally, make font a bit smaller and less prominent
-        # contact_label_font = contact_label.font()
-        # contact_label_font.setPointSize(contact_label_font.pointSize() - 1)
-        # contact_label.setFont(contact_label_font)
         contact_label.setStyleSheet("font-size: 9pt; color: #cccccc;") # Light gray for dark theme
         layout.addWidget(contact_label)
+
+    def _create_file_changes_section(self, layout):
+        """Create the file changes section with clickable files"""
+        self.file_changes_group = QGroupBox("Modified Files")
+        file_changes_layout = QVBoxLayout(self.file_changes_group)
+
+        # Info row with file count and controls
+        info_controls_layout = QHBoxLayout()
+        
+        # File count info
+        file_count_label = QLabel(f"{len(self.modified_files)} files")
+        file_count_label.setStyleSheet("color: #cccccc; font-size: 10pt;")
+        
+        # Control buttons (smaller)
+        select_all_btn = QPushButton("All")
+        deselect_all_btn = QPushButton("None")
+        
+        # Make buttons smaller
+        for btn in [select_all_btn, deselect_all_btn]:
+            btn.setMaximumWidth(50)
+            btn.setStyleSheet("font-size: 9pt; padding: 2px 6px;")
+        
+        select_all_btn.clicked.connect(self._select_all_files)
+        deselect_all_btn.clicked.connect(self._deselect_all_files)
+        
+        info_controls_layout.addWidget(file_count_label)
+        info_controls_layout.addStretch()
+        info_controls_layout.addWidget(select_all_btn)
+        info_controls_layout.addWidget(deselect_all_btn)
+        file_changes_layout.addLayout(info_controls_layout)
+
+        # Custom file list
+        self.file_list = FileListWidget(self)
+        self.file_list.set_main_window(self)
+        
+        for file_path in self.modified_files:
+            self.file_list.add_file(file_path)
+            # Only add .md files to selected_files by default
+            if file_path.lower().endswith('.md'):
+                self.selected_files.add(file_path)
+        
+        file_changes_layout.addWidget(self.file_list)
+        layout.addWidget(self.file_changes_group)
+
+    def _create_quick_actions_section(self, layout):
+        """Create enhanced quick action buttons with more features"""
+        self.quick_actions_group = QGroupBox("Quick Actions")
+        quick_actions_layout = QVBoxLayout(self.quick_actions_group)
+
+        # Row 1: Main actions
+        main_actions_layout = QHBoxLayout()
+        main_actions = [
+            ("✅ Continue", "Looks good, continue with the implementation."),
+            ("💬 Discuss", "I have some questions about this approach."),
+            ("🔧 Fix Issues", "There are some issues that need to be addressed."),
+        ]
+
+        for text, feedback in main_actions:
+            btn = QPushButton(text)
+            btn.setStyleSheet("font-size: 10pt; padding: 4px 8px;")
+            btn.clicked.connect(lambda checked, f=feedback: self._set_quick_feedback(f))
+            main_actions_layout.addWidget(btn)
+
+        # Row 2: Secondary actions  
+        secondary_actions_layout = QHBoxLayout()
+        secondary_actions = [
+            ("🧪 Add Tests", "Please add tests for these changes."),
+            ("🎯 Perfect", "Perfect! These changes look great."),
+            ("⏸️ Stop", "Stop here, I want to review manually.")
+        ]
+
+        for text, feedback in secondary_actions:
+            btn = QPushButton(text)
+            btn.setStyleSheet("font-size: 10pt; padding: 4px 8px;")
+            btn.clicked.connect(lambda checked, f=feedback: self._set_quick_feedback(f))
+            secondary_actions_layout.addWidget(btn)
+
+        # Row 3: Advanced features
+        advanced_layout = QHBoxLayout()
+        
+        # Preview button
+        self.preview_btn = QPushButton("👁️ Preview")
+        self.preview_btn.setStyleSheet("font-size: 9pt; padding: 2px 6px;")
+        self.preview_btn.clicked.connect(self._show_file_preview)
+        
+        # Smart suggestions button
+        self.smart_btn = QPushButton("🤖 Smart")
+        self.smart_btn.setStyleSheet("font-size: 9pt; padding: 2px 6px;")
+        self.smart_btn.clicked.connect(self._show_smart_suggestions)
+        
+        # Clear button
+        clear_btn = QPushButton("🗑️ Clear")
+        clear_btn.setStyleSheet("font-size: 9pt; padding: 2px 6px;")
+        clear_btn.clicked.connect(lambda: self.feedback_text.clear())
+        
+        advanced_layout.addWidget(self.preview_btn)
+        advanced_layout.addWidget(self.smart_btn)
+        advanced_layout.addStretch()
+        advanced_layout.addWidget(clear_btn)
+
+        quick_actions_layout.addLayout(main_actions_layout)
+        quick_actions_layout.addLayout(secondary_actions_layout)
+        quick_actions_layout.addLayout(advanced_layout)
+        
+        layout.addWidget(self.quick_actions_group)
+
+    def _select_all_files(self):
+        """Select all files in the list"""
+        if hasattr(self, 'file_list'):
+            self.file_list.select_all()
+            # Update selected_files set to include all files
+            self.selected_files = set(self.modified_files)
+
+    def _deselect_all_files(self):
+        """Deselect all files in the list"""
+        if hasattr(self, 'file_list'):
+            self.file_list.deselect_all()
+            # Clear selected_files set
+            self.selected_files.clear()
+
+    def _on_file_selection_changed_new(self, file_path: str, is_checked: bool):
+        """Handle file selection changes from custom widget"""
+        if is_checked:
+            self.selected_files.add(file_path)
+        else:
+            self.selected_files.discard(file_path)
+
+    def _on_file_selection_changed(self, item):
+        """Legacy handler for QListWidget - kept for compatibility"""
+        file_path = item.text()
+        if item.checkState() == Qt.Checked:
+            self.selected_files.add(file_path)
+        else:
+            self.selected_files.discard(file_path)
+
+    def _set_quick_feedback(self, feedback_text):
+        """Set quick feedback text and focus on feedback area"""
+        self.feedback_text.setPlainText(feedback_text)
+        self.feedback_text.setFocus()
+        
+    def _show_file_preview(self):
+        """Show quick preview of selected files"""
+        if not self.selected_files:
+            self._set_quick_feedback("⚠️ No files selected for preview.")
+            return
+            
+        if len(self.selected_files) > 3:
+            self._set_quick_feedback(f"📄 Preview: {len(self.selected_files)} files selected (too many to preview, will include in context)")
+            return
+            
+        preview_lines = []
+        preview_lines.append("📄 File Preview:")
+        preview_lines.append("")
+        
+        for file_path in sorted(list(self.selected_files)[:3]):  # Max 3 files
+            full_path = os.path.join(self.project_directory, file_path)
+            try:
+                if os.path.exists(full_path):
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    
+                    lines = content.split('\n')
+                    size_info = f"{len(lines)} lines, {len(content)} chars"
+                    
+                    preview_lines.append(f"• {file_path} ({size_info})")
+                    
+                    # Show first few lines
+                    for i, line in enumerate(lines[:3]):
+                        preview_lines.append(f"  {i+1}: {line}")
+                    if len(lines) > 3:
+                        preview_lines.append(f"  ... ({len(lines) - 3} more lines)")
+                    preview_lines.append("")
+                else:
+                    preview_lines.append(f"• {file_path} (file not found)")
+                    preview_lines.append("")
+            except Exception as e:
+                preview_lines.append(f"• {file_path} (error: {str(e)})")
+                preview_lines.append("")
+        
+        preview_lines.append("👆 Ready to include full content in feedback.")
+        self.feedback_text.setPlainText('\n'.join(preview_lines))
+        
+    def _show_smart_suggestions(self):
+        """Show smart suggestions based on file types and patterns"""
+        if not self.selected_files:
+            suggestions = [
+                "🤖 Smart Suggestions:",
+                "",
+                "• General feedback: Continue with the implementation",
+                "• If you see issues: Please fix the errors I mentioned",
+                "• If you need more: Let's discuss this approach further",
+                "• If it's good: Perfect! These changes look great"
+            ]
+        else:
+            suggestions = ["🤖 Smart Suggestions based on files:"]
+            suggestions.append("")
+            
+            # Analyze file types
+            python_files = [f for f in self.selected_files if f.endswith('.py')]
+            js_files = [f for f in self.selected_files if f.endswith(('.js', '.ts', '.jsx', '.tsx'))]
+            test_files = [f for f in self.selected_files if 'test' in f.lower() or f.endswith('_test.py')]
+            config_files = [f for f in self.selected_files if f.endswith(('.json', '.yaml', '.yml', '.toml', '.ini'))]
+            
+            if test_files:
+                suggestions.append("🧪 Test files detected:")
+                suggestions.append("• 'Run the tests to make sure they pass'")
+                suggestions.append("• 'Add more test cases for edge cases'")
+                suggestions.append("")
+                
+            if python_files:
+                suggestions.append("🐍 Python files detected:")
+                suggestions.append("• 'Check for PEP 8 compliance'")
+                suggestions.append("• 'Add type hints if missing'")
+                suggestions.append("• 'Consider adding docstrings'")
+                suggestions.append("")
+                
+            if js_files:
+                suggestions.append("📜 JavaScript/TypeScript files detected:")
+                suggestions.append("• 'Run linter and fix any issues'")
+                suggestions.append("• 'Check for proper error handling'")
+                suggestions.append("• 'Ensure proper TypeScript types'")
+                suggestions.append("")
+                
+            if config_files:
+                suggestions.append("⚙️ Config files detected:")
+                suggestions.append("• 'Validate configuration syntax'")
+                suggestions.append("• 'Check if all required fields are present'")
+                suggestions.append("")
+                
+            # File count based suggestions
+            if len(self.selected_files) > 5:
+                suggestions.append("📊 Many files changed:")
+                suggestions.append("• 'This is a large change, let's break it down'")
+                suggestions.append("• 'Please test thoroughly before proceeding'")
+                suggestions.append("")
+            
+            suggestions.append("💡 General suggestions:")
+            suggestions.append("• 'Continue - everything looks good'")
+            suggestions.append("• 'Let's discuss - I have questions'")
+            suggestions.append("• 'Fix issues - there are problems to address'")
+            
+        self.feedback_text.setPlainText('\n'.join(suggestions))
+
+    def _setup_keyboard_shortcuts(self):
+        """Setup keyboard shortcuts for better productivity"""
+        # Ctrl+Enter: Submit feedback (already handled in FeedbackTextEdit)
+        
+        # Ctrl+1-6: Quick actions
+        shortcuts_actions = [
+            ("Ctrl+1", lambda: self._set_quick_feedback("Looks good, continue with the implementation.")),
+            ("Ctrl+2", lambda: self._set_quick_feedback("I have some questions about this approach.")),
+            ("Ctrl+3", lambda: self._set_quick_feedback("There are some issues that need to be addressed.")),
+            ("Ctrl+4", lambda: self._set_quick_feedback("Please add tests for these changes.")),
+            ("Ctrl+5", lambda: self._set_quick_feedback("Perfect! These changes look great.")),
+            ("Ctrl+6", lambda: self._set_quick_feedback("Stop here, I want to review manually."))
+        ]
+        
+        for shortcut_key, action in shortcuts_actions:
+            shortcut = QShortcut(QKeySequence(shortcut_key), self)
+            shortcut.activated.connect(action)
+        
+        # Ctrl+P: Preview files
+        preview_shortcut = QShortcut(QKeySequence("Ctrl+P"), self)
+        preview_shortcut.activated.connect(self._show_file_preview)
+        
+        # Ctrl+S: Smart suggestions
+        smart_shortcut = QShortcut(QKeySequence("Ctrl+Shift+S"), self)
+        smart_shortcut.activated.connect(self._show_smart_suggestions)
+        
+        # Ctrl+A: Select all files (when file list is focused)
+        select_all_shortcut = QShortcut(QKeySequence("Ctrl+Shift+A"), self)
+        select_all_shortcut.activated.connect(self._select_all_files)
+        
+        # Ctrl+D: Deselect all files
+        deselect_all_shortcut = QShortcut(QKeySequence("Ctrl+Shift+D"), self)
+        deselect_all_shortcut.activated.connect(self._deselect_all_files)
+        
+        # Escape: Clear feedback text
+        clear_shortcut = QShortcut(QKeySequence("Escape"), self)
+        clear_shortcut.activated.connect(lambda: self.feedback_text.clear())
+
+    def _setup_auto_save(self):
+        """Setup auto-save for feedback drafts"""
+        self.auto_save_timer = QTimer()
+        self.auto_save_timer.timeout.connect(self._auto_save_draft)
+        self.auto_save_timer.start(5000)  # Auto-save every 5 seconds
+        
+        # Load existing draft
+        self._load_draft()
+
+    def _auto_save_draft(self):
+        """Auto-save current feedback as draft"""
+        if hasattr(self, 'feedback_text'):
+            draft_text = self.feedback_text.toPlainText().strip()
+            if draft_text:  # Only save if there's content
+                self.settings.beginGroup(self.project_group_name)
+                self.settings.setValue("feedback_draft", draft_text)
+                self.settings.endGroup()
+
+    def _load_draft(self):
+        """Load saved draft if exists"""
+        self.settings.beginGroup(self.project_group_name)
+        draft = self.settings.value("feedback_draft", "", type=str)
+        self.settings.endGroup()
+        
+        if draft and hasattr(self, 'feedback_text'):
+            # Only load if feedback text is empty
+            if not self.feedback_text.toPlainText().strip():
+                self.feedback_text.setPlainText(draft)
+                # Add a subtle indicator that this is a draft
+                self.feedback_text.setPlaceholderText("Draft loaded - Ctrl+Enter to submit")
+
+    def _clear_draft(self):
+        """Clear saved draft"""
+        self.settings.beginGroup(self.project_group_name)
+        self.settings.remove("feedback_draft")
+        self.settings.endGroup()
+
+    def _get_selected_files_content(self):
+        """Read content of selected files"""
+        if not self.selected_files:
+            return None
+            
+        content_parts = []
+        content_parts.append("## Files Modified by User:")
+        content_parts.append("")
+        
+        for file_path in sorted(self.selected_files):
+            full_path = os.path.join(self.project_directory, file_path)
+            try:
+                if os.path.exists(full_path):
+                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    content_parts.append(f"### {file_path}")
+                    content_parts.append("```")
+                    content_parts.append(content)
+                    content_parts.append("```")
+                    content_parts.append("")
+                else:
+                    content_parts.append(f"### {file_path} (file not found)")
+                    content_parts.append("")
+            except Exception as e:
+                content_parts.append(f"### {file_path} (error reading: {str(e)})")
+                content_parts.append("")
+        
+        return "\n".join(content_parts)
 
     def _toggle_command_section(self):
         is_visible = self.command_group.isVisible()
@@ -497,9 +1014,24 @@ class FeedbackUI(QMainWindow):
             self.run_button.setText("&Run")
 
     def _submit_feedback(self):
+        # Get selected files content
+        selected_files_content = self._get_selected_files_content()
+        
+        # Combine user feedback with file context
+        user_feedback = self.feedback_text.toPlainText().strip()
+        combined_feedback = user_feedback
+        
+        if selected_files_content:
+            combined_feedback = f"{selected_files_content}\n\n## User Feedback:\n{user_feedback}"
+        
+        # Clear draft after successful submission
+        self._clear_draft()
+        
         self.feedback_result = FeedbackResult(
-            logs="".join(self.log_buffer),
-            interactive_feedback=self.feedback_text.toPlainText().strip(),
+            command_logs="".join(self.log_buffer),
+            interactive_feedback=combined_feedback,
+            modified_files_content=selected_files_content,
+            selected_files=list(self.selected_files)
         )
         self.close()
 
@@ -539,7 +1071,12 @@ class FeedbackUI(QMainWindow):
             kill_tree(self.process)
 
         if not self.feedback_result:
-            return FeedbackResult(logs="".join(self.log_buffer), interactive_feedback="")
+            return FeedbackResult(
+                command_logs="".join(self.log_buffer), 
+                interactive_feedback="",
+                modified_files_content=None,
+                selected_files=[]
+            )
 
         return self.feedback_result
 
@@ -550,11 +1087,11 @@ def get_project_settings_group(project_dir: str) -> str:
     full_hash = hashlib.md5(project_dir.encode('utf-8')).hexdigest()[:8]
     return f"{basename}_{full_hash}"
 
-def feedback_ui(project_directory: str, prompt: str, output_file: Optional[str] = None) -> Optional[FeedbackResult]:
+def feedback_ui(project_directory: str, prompt: str, output_file: Optional[str] = None, modified_files: Optional[List[str]] = None) -> Optional[FeedbackResult]:
     app = QApplication.instance() or QApplication()
     app.setPalette(get_dark_mode_palette(app))
     app.setStyle("Fusion")
-    ui = FeedbackUI(project_directory, prompt)
+    ui = FeedbackUI(project_directory, prompt, modified_files)
     result = ui.run()
 
     if output_file and result:
@@ -572,10 +1109,14 @@ if __name__ == "__main__":
     parser.add_argument("--project-directory", default=os.getcwd(), help="The project directory to run the command in")
     parser.add_argument("--prompt", default="I implemented the changes you requested.", help="The prompt to show to the user")
     parser.add_argument("--output-file", help="Path to save the feedback result as JSON")
+    parser.add_argument("--modified-files", help="JSON string of modified file paths", default=None)
     args = parser.parse_args()
 
-    result = feedback_ui(args.project_directory, args.prompt, args.output_file)
+    modified_files = json.loads(args.modified_files) if args.modified_files else None
+    result = feedback_ui(args.project_directory, args.prompt, args.output_file, modified_files)
     if result:
-        print(f"\nLogs collected: \n{result['logs']}")
+        print(f"\nLogs collected: \n{result['command_logs']}")
         print(f"\nFeedback received:\n{result['interactive_feedback']}")
+        if result['selected_files']:
+            print(f"\nSelected files: {', '.join(result['selected_files'])}")
     sys.exit(0)
