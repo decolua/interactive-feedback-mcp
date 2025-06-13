@@ -6,6 +6,8 @@ import sys
 import json
 import tempfile
 import subprocess
+import glob
+from pathlib import Path
 
 from typing import Annotated, Dict, Optional, List
 
@@ -15,7 +17,40 @@ from pydantic import Field
 # The log_level is necessary for Cline to work: https://github.com/jlowin/fastmcp/issues/81
 mcp = FastMCP("Interactive Feedback MCP", log_level="ERROR")
 
+def find_latest_modified_md_file(project_directory: str) -> Optional[str]:
+    """Find the latest modified .md file in the project directory"""
+    try:
+        # Find all .md files in project directory (including subdirectories)
+        md_pattern = os.path.join(project_directory, "**", "*.md")
+        md_files = glob.glob(md_pattern, recursive=True)
+        
+        if not md_files:
+            return None
+        
+        # Sort by modification time, newest first
+        md_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        
+        # Return path relative to project directory
+        latest_file = md_files[0]
+        return os.path.relpath(latest_file, project_directory)
+    except Exception:
+        return None
+
+def enhance_modified_files(project_directory: str, modified_files: Optional[List[str]] = None) -> List[str]:
+    """Enhance modified_files by automatically adding the latest modified .md file"""
+    enhanced_files = modified_files.copy() if modified_files else []
+    
+    latest_md = find_latest_modified_md_file(project_directory)
+    
+    if latest_md and latest_md not in enhanced_files:
+        enhanced_files.append(latest_md)
+        print(f"🔍 Auto-detected latest modified .md file: {latest_md}", file=sys.stderr)
+    
+    return enhanced_files
+
 def launch_feedback_ui(project_directory: str, summary: str, modified_files: Optional[List[str]] = None) -> dict[str, str]:
+    enhanced_modified_files = enhance_modified_files(project_directory, modified_files)
+    
     # Create a temporary file for the feedback result
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp:
         output_file = tmp.name
@@ -37,9 +72,9 @@ def launch_feedback_ui(project_directory: str, summary: str, modified_files: Opt
             "--output-file", output_file
         ]
         
-        # Add modified files if provided
-        if modified_files:
-            args.extend(["--modified-files", json.dumps(modified_files)])
+        # Add enhanced modified files
+        if enhanced_modified_files:
+            args.extend(["--modified-files", json.dumps(enhanced_modified_files)])
         result = subprocess.run(
             args,
             check=False,
