@@ -702,8 +702,8 @@ class FeedbackUI(QMainWindow):
         # Define the rules as specified in the task
         self.rules_checkboxes = {}
         rules_config = [
-            ("single_operation", "All tasks involving the same file must be handled and edited in a single operation"),
-            ("no_new_md", "Do not create new MD files if user not request"),
+            ("single_operation", "All tasks involving the same file must be handled and edited in a single operation, single call"),
+            ("no_new_md", "Do not create new MD files if the user does not request them."),
             ("read_entire_file", "Try to read the entire file in a single call")
         ]
         
@@ -719,10 +719,8 @@ class FeedbackUI(QMainWindow):
             saved_state = self.settings.value(f"rule_{rule_key}", True, type=bool)
             self.settings.endGroup()
             
-
-            
             # Set initial state
-            checkbox.setChecked(saved_state)
+            checkbox.setChecked(True)
             
             # Store initial state to prevent unnecessary saves
             checkbox._initial_state = saved_state
