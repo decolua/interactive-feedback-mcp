@@ -9,6 +9,7 @@ import argparse
 import subprocess
 import threading
 import hashlib
+
 from typing import Optional, TypedDict, List
 
 from PySide6.QtWidgets import (
@@ -343,16 +344,36 @@ class FileListWidget(QScrollArea):
         """Notify main window of selection changes"""
         if self.main_window and hasattr(self.main_window, '_on_file_selection_changed_new'):
             self.main_window._on_file_selection_changed_new(file_path, is_checked)
+        # Reorder files after selection change
+        self._reorder_files()
+            
+    def _reorder_files(self):
+        """Reorder files to show checked files at the top"""
+        # Get all file items and sort them: checked first, then unchecked
+        sorted_items = sorted(
+            self.file_items.items(),
+            key=lambda x: (not x[1].isChecked(), x[0])  # False comes before True, so checked items first
+        )
+        
+        # Remove all widgets from layout
+        for file_path, item in self.file_items.items():
+            self.layout.removeWidget(item)
+        
+        # Add widgets back in sorted order
+        for file_path, item in sorted_items:
+            self.layout.addWidget(item)
             
     def select_all(self):
         """Select all files"""
         for item in self.file_items.values():
             item.setChecked(True)
+        self._reorder_files()
             
     def deselect_all(self):
         """Deselect all files"""
         for item in self.file_items.values():
             item.setChecked(False)
+        self._reorder_files()
             
     def get_selected_files(self) -> List[str]:
         """Get list of selected files"""
@@ -514,6 +535,9 @@ class FeedbackUI(QMainWindow):
         if self.modified_files:
             self._create_file_changes_section(layout)
 
+        # Rules section
+        self._create_rules_section(layout)
+
         # Quick Actions section
         self._create_quick_actions_section(layout)
 
@@ -547,16 +571,7 @@ class FeedbackUI(QMainWindow):
         # Add widgets in a specific order
         layout.addWidget(self.feedback_group)
 
-        # Help and keyboard shortcuts
-        help_layout = QHBoxLayout()
-        
-        # Keyboard shortcuts help
-        shortcuts_label = QLabel("💡 Shortcuts: Ctrl+1-6 (Quick actions) • Ctrl+P (Preview) • Ctrl+Shift+S (Smart) • Esc (Clear)")
-        shortcuts_label.setStyleSheet("font-size: 8pt; color: #999999;")
-        shortcuts_label.setWordWrap(True)
-        
-        help_layout.addWidget(shortcuts_label)
-        layout.addLayout(help_layout)
+
 
         # Credits/Contact Label
         contact_label = QLabel('Enhanced by AI • Contact Fábio Ferreira on <a href="https://x.com/fabiomlferreira">X.com</a> or visit <a href="https://dotcursorrules.com/">dotcursorrules.com</a>')
@@ -604,6 +619,9 @@ class FeedbackUI(QMainWindow):
             # Only add .md files to selected_files by default
             if file_path.lower().endswith('.md'):
                 self.selected_files.add(file_path)
+        
+        # Reorder files to show checked files at the top initially
+        self.file_list._reorder_files()
         
         file_changes_layout.addWidget(self.file_list)
         layout.addWidget(self.file_changes_group)
@@ -669,6 +687,89 @@ class FeedbackUI(QMainWindow):
         quick_actions_layout.addLayout(advanced_layout)
         
         layout.addWidget(self.quick_actions_group)
+
+    def _create_rules_section(self, layout):
+        """Create rules selection section with checkboxes"""
+        self.rules_group = QGroupBox("Additional Rules")
+        rules_layout = QVBoxLayout(self.rules_group)
+        
+        # Rules checkboxes
+        rules_container = QWidget()
+        rules_container_layout = QVBoxLayout(rules_container)
+        rules_container_layout.setContentsMargins(5, 5, 5, 5)
+        rules_container_layout.setSpacing(3)
+        
+        # Define the rules as specified in the task
+        self.rules_checkboxes = {}
+        rules_config = [
+            ("single_operation", "All tasks involving the same file must be handled and edited in a single operation"),
+            ("no_new_md", "Do not create new MD files if user not request"),
+            ("read_entire_file", "Try to read the entire file in a single call")
+        ]
+        
+        for rule_key, rule_text in rules_config:
+            checkbox = QCheckBox(rule_text)
+            checkbox.setStyleSheet("color: #ffffff; font-size: 9pt;")
+            
+            # Store rule_key as property of checkbox for easy access
+            checkbox.rule_key = rule_key
+            
+            # Load saved state for this rule (default to True)
+            self.settings.beginGroup(self.project_group_name)
+            saved_state = self.settings.value(f"rule_{rule_key}", True, type=bool)
+            self.settings.endGroup()
+            
+
+            
+            # Set initial state
+            checkbox.setChecked(saved_state)
+            
+            # Store initial state to prevent unnecessary saves
+            checkbox._initial_state = saved_state
+            
+            # Connect to save function AFTER setting initial state
+            checkbox.stateChanged.connect(self._on_rule_checkbox_changed)
+            
+            self.rules_checkboxes[rule_key] = checkbox
+            rules_container_layout.addWidget(checkbox)
+        
+        rules_layout.addWidget(rules_container)
+        layout.addWidget(self.rules_group)
+    
+    def _on_rule_checkbox_changed(self, state):
+        """Handle rule checkbox state change"""
+        sender = self.sender()
+        if hasattr(sender, 'rule_key'):
+            rule_key = sender.rule_key
+            checked = state == Qt.Checked
+            
+            # Only save if this is different from initial state (user actually changed it)
+            if hasattr(sender, '_initial_state') and checked == sender._initial_state:
+                return
+                
+            self._save_rule_state(rule_key, checked)
+            
+            # Update initial state to prevent repeated saves
+            sender._initial_state = checked
+    
+    def _save_rule_state(self, rule_key: str, checked: bool):
+        """Save rule checkbox state"""
+        self.settings.beginGroup(self.project_group_name)
+        self.settings.setValue(f"rule_{rule_key}", checked)
+        self.settings.endGroup()
+        # Force sync to ensure settings are saved immediately
+        self.settings.sync()
+
+
+    
+    def _get_selected_rules(self) -> List[str]:
+        """Get list of selected rules for inclusion in feedback"""
+        selected_rules = []
+        for rule_key, checkbox in self.rules_checkboxes.items():
+            if checkbox.isChecked():
+                rule_text = checkbox.text()
+                selected_rules.append(f"- {rule_text}")
+        return selected_rules
 
     def _select_all_files(self):
         """Select all files in the list"""
@@ -1017,12 +1118,27 @@ class FeedbackUI(QMainWindow):
         # Get selected files content
         selected_files_content = self._get_selected_files_content()
         
-        # Combine user feedback with file context
+        # Get selected rules
+        selected_rules = self._get_selected_rules()
+        
+        # Combine user feedback with file context and rules
         user_feedback = self.feedback_text.toPlainText().strip()
         combined_feedback = user_feedback
         
+        # Add rules section if any rules are selected
+        if selected_rules:
+            rules_section = f"## Additional Rules to Apply:\n" + "\n".join(selected_rules)
+            if combined_feedback:
+                combined_feedback = f"{rules_section}\n\n{combined_feedback}"
+            else:
+                combined_feedback = rules_section
+        
+        # Add files content if any
         if selected_files_content:
-            combined_feedback = f"{selected_files_content}\n\n## User Feedback:\n{user_feedback}"
+            if combined_feedback:
+                combined_feedback = f"{selected_files_content}\n\n## User Feedback:\n{combined_feedback}"
+            else:
+                combined_feedback = selected_files_content
         
         # Clear draft after successful submission
         self._clear_draft()
