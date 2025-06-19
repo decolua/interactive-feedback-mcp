@@ -15,7 +15,8 @@ from typing import Optional, TypedDict, List
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QCheckBox, QTextEdit, QGroupBox,
-    QListWidget, QListWidgetItem, QSplitter, QScrollArea, QFrame
+    QListWidget, QListWidgetItem, QSplitter, QScrollArea, QFrame,
+    QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal, QObject, QTimer, QSettings
 from PySide6.QtGui import QShortcut, QKeySequence
@@ -634,7 +635,7 @@ class FeedbackUI(QMainWindow):
         # Row 1: Main actions
         main_actions_layout = QHBoxLayout()
         main_actions = [
-            ("✅ Continue", "Looks good, continue with the implementation."),
+            ("✅ Continue", "Continue with the implementation."),
             ("💬 Discuss", "I have some questions about this approach."),
             ("🔧 Fix Issues", "There are some issues that need to be addressed."),
         ]
@@ -702,17 +703,45 @@ class FeedbackUI(QMainWindow):
         # Define the rules as specified in the task
         self.rules_checkboxes = {}
         rules_config = [
-            ("single_operation", "All tasks involving the same file must be handled and edited in a single operation, single call"),
-            ("no_new_md", "Do not create new MD files if the user does not request them."),
-            ("read_entire_file", "Try to read the entire file in a single call")
+            ("single_operation", "ALWAYS BATCH EDIT: GROUP all EDITS on the SAME FILE into ONE OPERATION, do NOT use MULTIPLE CALLS, READ ENTIRE FILE in ONE CALL, do NOT CREATE or MODIFY other FILES unless REQUESTED, applies to ALL TOOL CALLS."),
+            ("no_new_md", "AFTER EVERY ACTION OR RESPONSE, THE AGENT MUST CALL MCP interactive_feedback — WITHOUT EXCEPTION — AND MUST NOT COMPLETE OR END THE PROCESS UNTIL USER FEEDBACK IS EMPTY."),
         ]
         
         for rule_key, rule_text in rules_config:
-            checkbox = QCheckBox(rule_text)
-            checkbox.setStyleSheet("color: #ffffff; font-size: 9pt;")
+            # Create a container widget for better width control
+            checkbox_container = QWidget()
+            checkbox_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            
+            container_layout = QHBoxLayout(checkbox_container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(8)
+            
+            # Create checkbox without text
+            checkbox = QCheckBox()
+            checkbox.setFixedSize(16, 16)  # Fixed size for the checkbox indicator
+            
+            # Create label with word wrap for the text
+            label = QLabel(rule_text)
+            label.setStyleSheet("color: #ffffff; font-size: 9pt;")
+            label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+            
+            # Make label clickable to toggle checkbox
+            def make_label_clickable(cb):
+                def label_clicked(event):
+                    cb.setChecked(not cb.isChecked())
+                return label_clicked
+            
+            label.mousePressEvent = make_label_clickable(checkbox)
+            label.setStyleSheet("color: #ffffff; font-size: 9pt; cursor: pointer;")
+            
+            container_layout.addWidget(checkbox)
+            container_layout.addWidget(label)
             
             # Store rule_key as property of checkbox for easy access
             checkbox.rule_key = rule_key
+            # Store reference to label for getting text later
+            checkbox.rule_label = label
             
             # Load saved state for this rule (default to True)
             self.settings.beginGroup(self.project_group_name)
@@ -729,7 +758,7 @@ class FeedbackUI(QMainWindow):
             checkbox.stateChanged.connect(self._on_rule_checkbox_changed)
             
             self.rules_checkboxes[rule_key] = checkbox
-            rules_container_layout.addWidget(checkbox)
+            rules_container_layout.addWidget(checkbox_container)
         
         rules_layout.addWidget(rules_container)
         layout.addWidget(self.rules_group)
@@ -765,7 +794,8 @@ class FeedbackUI(QMainWindow):
         selected_rules = []
         for rule_key, checkbox in self.rules_checkboxes.items():
             if checkbox.isChecked():
-                rule_text = checkbox.text()
+                # Get text from the associated label instead of checkbox
+                rule_text = checkbox.rule_label.text() if hasattr(checkbox, 'rule_label') else checkbox.text()
                 selected_rules.append(f"- {rule_text}")
         return selected_rules
 
@@ -951,7 +981,7 @@ class FeedbackUI(QMainWindow):
         self.auto_save_timer.start(5000)  # Auto-save every 5 seconds
         
         # Load existing draft
-        self._load_draft()
+        # self._load_draft()
 
     def _auto_save_draft(self):
         """Auto-save current feedback as draft"""
